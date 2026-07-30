@@ -473,9 +473,6 @@ with st.sidebar.expander("📁 Templates"):
     else:
         st.info("Carpeta Templates no encontrada.")
 
-# ── Footer ─────────────────────────────────────────────────
-st.sidebar.markdown("---")
-st.sidebar.caption("Desarrollado por Maritz Team")
 
 # ── Data Load ──────────────────────────────
 df, config = None, None
@@ -638,3 +635,15 @@ if not prod_df.empty:
             lambda x: f"{x:.4f}%" if pd.notna(x) else ""
         )
         st.dataframe(display.sort_values("ActualPeriod"), use_container_width=True)
+
+# ── Footer ─────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.markdown(
+    """
+    <div style="text-align: right;">
+        © 2026 Softtek. All rights reserved.<br>
+        Developed by the Softtek - Maritz Team
+    </div>
+    """,
+    unsafe_allow_html=True
+)
