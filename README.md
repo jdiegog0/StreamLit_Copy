@@ -31,7 +31,7 @@ openpyxl
 
 ### Opción B — Streamlit Cloud
 ```
-https://appapp-evlye6wjacvnkpqqpnpyfe.streamlit.app/
+https://appcopygit-wvg8kuvbnjb2spu2pco42l.streamlit.app/
 ```
 
 ---
