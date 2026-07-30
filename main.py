@@ -4,6 +4,7 @@
   Modelos:
     · Galderma  → More is Best (Points)
     · AMS       → Less is Best (Effort)
+    · ITIS      → Less is Best (Ticket Duration / Effort)
 =============================================================
 """
 
@@ -57,19 +58,35 @@ def load_galderma(uploaded_file):
     df = df[df["Status"].isin(["Ready to Deploy", "Closed"])].copy()
     df["Grupo"] = "Grupo"
 
-    # Split Developer por "/"
+    # Lógica actualizada: Dividir puntos por cantidad de Developers
     if "Developer" in df.columns:
         df["Developer"] = df["Developer"].astype("string").str.strip()
         df = df[df["Developer"].notna() & (df["Developer"] != "")].copy()
-        df = df.assign(Developer=df["Developer"].str.split("/")).explode("Developer")
+        
+        # 1. Estandarizar separador
+        df["Developer"] = df["Developer"].str.replace("-", "/", regex=False)
+        
+        # 2. Convertir a lista
+        df["Developer"] = df["Developer"].str.split("/")
+        
+        # 3. Contar la cantidad de developers en la lista
+        df["Dev_Count"] = df["Developer"].apply(lambda x: len(x) if isinstance(x, list) else 1)
+        
+        # 4. Dividir puntos
+        df["Points"] = df["Points"] / df["Dev_Count"]
+        
+        # 5. Expandir registros
+        df = df.explode("Developer")
+        
         df["Developer"] = df["Developer"].astype("string").str.strip()
         df = df[
             df["Developer"].notna()
             & (df["Developer"] != "")
             & (df["Developer"].str.lower() != "nan")
         ].copy()
+        
+        df = df.drop(columns=["Dev_Count"])
 
-    ## df = df[df["Period"].notna() & df["Points"].notna()].copy() ## Blank or NAN filter for Modelo Galderma
     # ════════════════════════════════════════════════════════════
     config = {
         "metric_col":   "Points",
@@ -84,7 +101,7 @@ def load_galderma(uploaded_file):
 # ════════════════════════════════════════════════════════════
 #  DATA LOAD FOR AMS MODEL (Effort / Less is Best)
 # ════════════════════════════════════════════════════════════
-def detect_columns(df: pd.DataFrame) -> dict:
+def detect_columns_ams(df: pd.DataFrame) -> dict:
     
     col_map = {
         "Assigned To": None, "IS": None, "Group": None, "WBS": None,
@@ -98,7 +115,6 @@ def detect_columns(df: pd.DataFrame) -> dict:
         if   c in ["assigned to", "assignee", "resource"]:         col_map["Assigned To"]  = col
         elif c == "is":                                             col_map["IS"]           = col
         elif c == "group":                                          col_map["Group"]        = col
-        
         elif c == "wbs":                                            col_map["WBS"]          = col
         elif c == "category":                                       col_map["Category"]     = col
         elif c in ["service type", "servicetype"]:                  col_map["Service Type"] = col
@@ -121,7 +137,7 @@ def load_ams(uploaded_file):
     df    = pd.read_excel(uploaded_file, sheet_name=sname)
     df.columns = df.columns.str.strip().str.replace(r"\s+", " ", regex=True)
 
-    col_map = detect_columns(df)
+    col_map = detect_columns_ams(df)
 
     required = ["Assigned To", "Group", "WBS", "EndDate", "Effort"]
     missing  = [k for k in required if col_map[k] is None]
@@ -133,14 +149,55 @@ def load_ams(uploaded_file):
     df["EndDate"] = pd.to_datetime(df["EndDate"], errors="coerce")
     df["Period"]  = df["EndDate"].dt.to_period("M").dt.to_timestamp()
     df["Effort"]  = pd.to_numeric(df["Effort"], errors="coerce")
-    ## df = df[df["Period"].notna() & df["Effort"].notna()].copy()  ## Blank or NAN filter for AMS Model
-    # ════════════════════════════════════════════════════════════
 
+    # ════════════════════════════════════════════════════════════
     config = {
         "metric_col":   "Effort",
         "more_is_best": False,
         "dimensions":   [c for c in ["Assigned To", "IS", "Group", "WBS", "Category", "Service Type"]
                          if c in df.columns],
+        "label_real":   "Real Effort",
+        "label_exp":    "Expected Effort",
+    }
+    return df, config
+
+
+# ════════════════════════════════════════════════════════════
+#  DATA LOAD FOR ITIS MODEL (Effort / Less is Best)
+# ════════════════════════════════════════════════════════════
+def load_itis(uploaded_file):
+    
+    xls   = pd.ExcelFile(uploaded_file)
+    sname = "Data Template" if "Data Template" in xls.sheet_names else xls.sheet_names[0]
+    df    = pd.read_excel(uploaded_file, sheet_name=sname)
+    df.columns = df.columns.str.strip().str.replace(r"\s+", " ", regex=True)
+
+    # Validar columnas requeridas (Traducción del R)
+    required_cols = ["Ticket Closed/Resolved Date", "Ticket Duration", "Assignee", "Ticket Type"]
+    missing = [c for c in required_cols if c not in df.columns]
+    
+    if missing:
+        return None, f"Missing required columns for ITIS model: {missing}"
+
+    # Limpieza de fechas y transformación a Periodo Mensual (Día 1)
+    df["Date_Temp"] = pd.to_datetime(df["Ticket Closed/Resolved Date"], errors="coerce")
+    df["Period"] = df["Date_Temp"].dt.to_period("M").dt.to_timestamp()
+    
+    # Cálculo de esfuerzo (Minutos -> Horas)
+    df["Ticket Duration"] = pd.to_numeric(df["Ticket Duration"], errors="coerce")
+    df["Effort"] = df["Ticket Duration"] / 60.0
+    
+    # Asignar Grupo General
+    df["Grupo"] = "Grupo"
+
+    # Filtrar registros sin fecha o sin esfuerzo
+    df = df[df["Period"].notna() & df["Effort"].notna()].copy()
+
+    # ════════════════════════════════════════════════════════════
+    config = {
+        "metric_col":   "Effort",
+        "more_is_best": False, # Menos esfuerzo (horas) es mejor
+        "dimensions":   [c for c in ["Assignee", "Ticket Type", "Grupo"] if c in df.columns],
         "label_real":   "Real Effort",
         "label_exp":    "Expected Effort",
     }
@@ -154,7 +211,7 @@ def aggregate_monthly(df: pd.DataFrame, dimension: str, metric_col: str) -> pd.D
 
     agg = (
         df.groupby(["Period", dimension], dropna=False)
-        .agg(n=(metric_col, "size"), # Change from "count" to "size" to include the blank records
+        .agg(n=(metric_col, "size"),
              Sum=(metric_col, "sum"), 
              Mean=(metric_col, "mean")) 
         .reset_index()
@@ -238,11 +295,7 @@ def fx_productivity_v3(db_agg, dimension, more_is_best, selected_values=None):
     return pd.DataFrame(rows)
 
 
-# ════════════════════════════════════════════════════════════
-#  PRODUCTIVITY CALCULATION #2
-# ════════════════════════════════════════════════════════════
 def calc_individual_productivity(db_agg, dimension, more_is_best, selected_values):
-    
     results = []
     for val in selected_values:
         res = fx_productivity_v3(db_agg, dimension, more_is_best, [val])
@@ -253,7 +306,6 @@ def calc_individual_productivity(db_agg, dimension, more_is_best, selected_value
 
 
 def calc_global_productivity(db_agg, dimension, more_is_best, selected_values):
-    
     res = fx_productivity_v3(db_agg, dimension, more_is_best, selected_values)
     if not res.empty:
         res[dimension] = "Group Total"
@@ -366,20 +418,33 @@ def make_velocity_chart(prod_df, dimension, metric_col, label_real, label_exp):
 st.sidebar.header("⚙️ Model")
 model_choice = st.sidebar.radio(
     "Select productivity model",
-    ["🟢  Galderma · Points  (More is Best)", "🔵  AMS · Effort  (Less is Best)"],
+    [
+        "🟢  Galderma · Points  (More is Best)", 
+        "🔵  AMS · Effort  (Less is Best)",
+        "🟠  ITIS · Duration  (Less is Best)"
+    ],
     help=(
         "Galderma: Tracks story points delivered by developers.\n"
-        "AMS: Tracks effort (hours) consumed per ticket — lower is better."
+        "AMS: Tracks effort (hours) consumed per ticket — lower is better.\n"
+        "ITIS: Tracks ticket duration (converted to hours) — lower is better."
     ),
 )
-is_ams = model_choice.startswith("🔵")
+is_galderma = model_choice.startswith("🟢")
+is_ams      = model_choice.startswith("🔵")
+is_itis     = model_choice.startswith("🟠")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📂 Data")
-uploaded_file = st.file_uploader(
-    f"Upload {'AMS' if is_ams else 'Galderma'} Excel file (.xlsx)",
-    type=["xlsx"],
-)
+
+# Modificar el texto del uploader dependiendo del modelo
+if is_galderma:
+    uploader_text = "Upload Galderma Excel file (.xlsx)"
+elif is_ams:
+    uploader_text = "Upload AMS Excel file (.xlsx)"
+else:
+    uploader_text = "Upload ITIS 'Account Ticket Analysis' (.xlsx)"
+    
+uploaded_file = st.file_uploader(uploader_text, type=["xlsx"])
 
 # ── Documentación & Templates ──────────────────────────────
 st.sidebar.markdown("---")
@@ -418,18 +483,25 @@ df, config = None, None
 if uploaded_file:
     if is_ams:
         result = load_ams(uploaded_file)
-        if result[0] is None:
-            st.error(result[1])
-            st.stop()
+    elif is_itis:
+        result = load_itis(uploaded_file)
+    else:
+        result = load_galderma(uploaded_file)
+        
+    if isinstance(result, tuple) and result[0] is None:
+        st.error(result[1])
+        st.stop()
+    elif isinstance(result, tuple):
         df, config = result
     else:
-        df, config = load_galderma(uploaded_file)
+        df, config = result
 else:
-    # Local Files
+    # Local Files Fallbacks
     galderma_path = Path("Galderma_12-01-24_to_03-31-26.xlsx")
     ams_path      = Path("DataForPythonAMS.xlsx")
+    itis_path     = Path("Account Ticket Analysis.xlsx")
 
-    if not is_ams and galderma_path.exists():
+    if is_galderma and galderma_path.exists():
         df, config = load_galderma(str(galderma_path))
         st.info(f"📄 Usando archivo local: {galderma_path.name}  —  {len(df):,} filas")
     elif is_ams and ams_path.exists():
@@ -439,19 +511,31 @@ else:
             st.stop()
         df, config = result
         st.info(f"📄 Local File: {ams_path.name}  —  {len(df):,} filas")
+    elif is_itis and itis_path.exists():
+        result = load_itis(str(itis_path))
+        if result[0] is None:
+            st.error(result[1])
+            st.stop()
+        df, config = result
+        st.info(f"📄 Local File: {itis_path.name}  —  {len(df):,} filas")
     else:
         st.info("⬆️  Upload an Excel file to begin.")
         st.stop()
 
 # ── Badge de modelo activo ───────────────────────────────────
-if is_ams:
+if is_galderma:
+    st.markdown(
+        "🟢 **GALDERMA MODEL** — MORE IS BEST (POINTS) &nbsp;|&nbsp; "
+        f"Metric: `{config['metric_col']}`"
+    )
+elif is_ams:
     st.markdown(
         "🔵 **AMS MODEL** — LESS IS BEST (EFFORT) &nbsp;|&nbsp; "
         f"Metric: `{config['metric_col']}`"
     )
 else:
     st.markdown(
-        "🟢 **GALDERMA MODEL** — MORE IS BEST (POINTS) &nbsp;|&nbsp; "
+        "🟠 **ITIS MODEL** — LESS IS BEST (EFFORT / HRS) &nbsp;|&nbsp; "
         f"Metric: `{config['metric_col']}`"
     )
 
