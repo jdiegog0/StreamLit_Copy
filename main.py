@@ -16,7 +16,7 @@ from pathlib import Path
 
 st.set_page_config(layout="wide", page_title="Productivity Analysis")
 
-# ─── WINDOW SIZES ────────────────────────────────────────────
+# ─── WINDOW SIZES (Default) ──────────────────────────────────
 CURRENT_SIZE  = 3
 BASELINE_SIZE = 3
 GAP_SIZE      = 3
@@ -58,34 +58,49 @@ def load_galderma(uploaded_file):
     df = df[df["Status"].isin(["Ready to Deploy", "Closed"])].copy()
     df["Grupo"] = "Grupo"
 
-    # Lógica actualizada: Dividir puntos por cantidad de Developers
+    # Lógica actualizada: Condición de retención por Developer o QA (Issue 3)
+    has_dev = None
     if "Developer" in df.columns:
-        df["Developer"] = df["Developer"].astype("string").str.strip()
-        df = df[df["Developer"].notna() & (df["Developer"] != "")].copy()
+        has_dev = df["Developer"].notna() & (df["Developer"].astype(str).str.strip() != "") & (df["Developer"].astype(str).str.lower() != "nan")
         
+    has_qa = None
+    if "QA Tester" in df.columns:
+        has_qa = df["QA Tester"].notna() & (df["QA Tester"].astype(str).str.strip() != "") & (df["QA Tester"].astype(str).str.lower() != "nan")
+        
+    if has_dev is not None and has_qa is not None:
+        df = df[has_dev | has_qa].copy()
+    elif has_dev is not None:
+        df = df[has_dev].copy()
+    elif has_qa is not None:
+        df = df[has_qa].copy()
+
+    # Lógica actualizada: Dividir puntos por cantidad de Developers (Issue 1)
+    if "Developer" in df.columns:
         # 1. Estandarizar separador
-        df["Developer"] = df["Developer"].str.replace("-", "/", regex=False)
+        df["Developer"] = df["Developer"].astype(str).str.replace("-", "/", regex=False)
         
-        # 2. Convertir a lista
-        df["Developer"] = df["Developer"].str.split("/")
+        # 2. Convertir a lista de forma segura (previniendo errores de 'float' y 'NaN')
+        def safe_split(x):
+            val = str(x).strip() # Forzamos a texto siempre para evitar errores de atributos
+            if val.lower() in ["unassigned", "nan", "none", "<na>", ""]:
+                return ["Unassigned"]
+            return val.split("/")
+            
+        df["Developer_List"] = df["Developer"].apply(safe_split)
         
         # 3. Contar la cantidad de developers en la lista
-        df["Dev_Count"] = df["Developer"].apply(lambda x: len(x) if isinstance(x, list) else 1)
+        df["Dev_Count"] = df["Developer_List"].apply(len)
         
-        # 4. Dividir puntos
+        # 4. Dividir puntos matemáticamente
         df["Points"] = df["Points"] / df["Dev_Count"]
         
-        # 5. Expandir registros
+        # 5. Expandir los registros hacia nuevas filas
+        df["Developer"] = df["Developer_List"]
         df = df.explode("Developer")
         
-        df["Developer"] = df["Developer"].astype("string").str.strip()
-        df = df[
-            df["Developer"].notna()
-            & (df["Developer"] != "")
-            & (df["Developer"].str.lower() != "nan")
-        ].copy()
-        
-        df = df.drop(columns=["Dev_Count"])
+        # 6. Limpieza
+        df["Developer"] = df["Developer"].astype(str).str.strip()
+        df = df.drop(columns=["Dev_Count", "Developer_List"])
 
     # ════════════════════════════════════════════════════════════
     config = {
@@ -172,31 +187,25 @@ def load_itis(uploaded_file):
     df    = pd.read_excel(uploaded_file, sheet_name=sname)
     df.columns = df.columns.str.strip().str.replace(r"\s+", " ", regex=True)
 
-    # Validar columnas requeridas (Traducción del R)
     required_cols = ["Ticket Closed/Resolved Date", "Ticket Duration", "Assignee", "Ticket Type"]
     missing = [c for c in required_cols if c not in df.columns]
     
     if missing:
         return None, f"Missing required columns for ITIS model: {missing}"
 
-    # Limpieza de fechas y transformación a Periodo Mensual (Día 1)
     df["Date_Temp"] = pd.to_datetime(df["Ticket Closed/Resolved Date"], errors="coerce")
     df["Period"] = df["Date_Temp"].dt.to_period("M").dt.to_timestamp()
     
-    # Cálculo de esfuerzo (Minutos -> Horas)
     df["Ticket Duration"] = pd.to_numeric(df["Ticket Duration"], errors="coerce")
     df["Effort"] = df["Ticket Duration"] / 60.0
     
-    # Asignar Grupo General
     df["Grupo"] = "Grupo"
-
-    # Filtrar registros sin fecha o sin esfuerzo
     df = df[df["Period"].notna() & df["Effort"].notna()].copy()
 
     # ════════════════════════════════════════════════════════════
     config = {
         "metric_col":   "Effort",
-        "more_is_best": False, # Menos esfuerzo (horas) es mejor
+        "more_is_best": False, 
         "dimensions":   [c for c in ["Assignee", "Ticket Type", "Grupo"] if c in df.columns],
         "label_real":   "Real Effort",
         "label_exp":    "Expected Effort",
@@ -224,7 +233,8 @@ def aggregate_monthly(df: pd.DataFrame, dimension: str, metric_col: str) -> pd.D
 # ════════════════════════════════════════════════════════════
 #  PRODUCTIVITY CALCULATION
 # ════════════════════════════════════════════════════════════
-def fx_productivity_v3(db_agg, dimension, more_is_best, selected_values=None):
+def fx_productivity_v3(db_agg, dimension, more_is_best, selected_values=None,
+                       current_size=CURRENT_SIZE, gap_size=GAP_SIZE, baseline_size=BASELINE_SIZE):
 
     signo = 1 if more_is_best else -1
     if selected_values is not None:
@@ -250,17 +260,17 @@ def fx_productivity_v3(db_agg, dimension, more_is_best, selected_values=None):
             n         = len(svc_data)
             max_fecha = svc_data["Period"].max()
 
-            if n < CURRENT_SIZE or current_period > max_fecha:
+            if n < current_size or current_period > max_fecha:
                 continue
 
-            has_baseline_full = n >= (CURRENT_SIZE + GAP_SIZE + BASELINE_SIZE)
-            cur_s, cur_e = 0, CURRENT_SIZE
+            has_baseline_full = n >= (current_size + gap_size + baseline_size)
+            cur_s, cur_e = 0, current_size
 
             if has_baseline_full:
-                bl_s = CURRENT_SIZE + GAP_SIZE
-                bl_e = CURRENT_SIZE + GAP_SIZE + BASELINE_SIZE
+                bl_s = current_size + gap_size
+                bl_e = current_size + gap_size + baseline_size
             else:
-                bl_s = max(0, n - BASELINE_SIZE)
+                bl_s = max(0, n - baseline_size)
                 bl_e = n
 
             cw = svc_data.iloc[cur_s:cur_e]
@@ -295,18 +305,18 @@ def fx_productivity_v3(db_agg, dimension, more_is_best, selected_values=None):
     return pd.DataFrame(rows)
 
 
-def calc_individual_productivity(db_agg, dimension, more_is_best, selected_values):
+def calc_individual_productivity(db_agg, dimension, more_is_best, selected_values, **kwargs):
     results = []
     for val in selected_values:
-        res = fx_productivity_v3(db_agg, dimension, more_is_best, [val])
+        res = fx_productivity_v3(db_agg, dimension, more_is_best, [val], **kwargs)
         if not res.empty:
             res[dimension] = str(val)
             results.append(res)
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
 
 
-def calc_global_productivity(db_agg, dimension, more_is_best, selected_values):
-    res = fx_productivity_v3(db_agg, dimension, more_is_best, selected_values)
+def calc_global_productivity(db_agg, dimension, more_is_best, selected_values, **kwargs):
+    res = fx_productivity_v3(db_agg, dimension, more_is_best, selected_values, **kwargs)
     if not res.empty:
         res[dimension] = "Group Total"
     return res
@@ -386,7 +396,7 @@ def make_productivity_chart(prod_df, dimension, label_real, label_exp):
     return fig
 
 
-def make_velocity_chart(prod_df, dimension, metric_col, label_real, label_exp):
+def make_velocity_chart(prod_df, dimension, metric_col, label_real, label_exp, chart_title="Velocity: Real vs Expected"):
     fig = go.Figure()
     vals   = prod_df[dimension].unique() if dimension in prod_df.columns else ["Group Total"]
     styles = [("EffortData", label_real, "solid"), ("BaseEfforEquiv", label_exp, "dash")]
@@ -404,7 +414,7 @@ def make_velocity_chart(prod_df, dimension, metric_col, label_real, label_exp):
             ))
     fig.add_hline(y=0, line_dash="dash", line_color="black", line_width=1.5)
     fig.update_layout(
-        title=f"Velocity: {label_real} vs {label_exp}",
+        title=chart_title,
         xaxis=XAXIS_STYLE, yaxis_title=metric_col,
         height=420, hovermode="x unified",
     )
@@ -436,7 +446,6 @@ is_itis     = model_choice.startswith("🟠")
 st.sidebar.markdown("---")
 st.sidebar.header("📂 Data")
 
-# Modificar el texto del uploader dependiendo del modelo
 if is_galderma:
     uploader_text = "Upload Galderma Excel file (.xlsx)"
 elif is_ams:
@@ -539,12 +548,15 @@ else:
 # ── Controls  ────────────────────────────────────────
 st.sidebar.header("Controls")
 
+# 1. Definimos la dimensión antes de procesarla en el DataFrame
 dimension = st.sidebar.selectbox("Analyze by", config["dimensions"])
 
+# 2. Ahora sí modificamos el DataFrame usando la dimensión seleccionada
 df[dimension] = df[dimension].astype(str)
 values = sorted(df[dimension].dropna().unique().tolist())
 
-default_sel = values[:3] if len(values) >= 3 else values
+# Remover "Unassigned" de la selección predeterminada si existe
+default_sel = [v for v in values if v != "Unassigned"][:3] if len(values) >= 3 else values
 selected_values = st.sidebar.multiselect("Select values", values, default=default_sel)
 
 analysis_mode = st.sidebar.radio(
@@ -555,8 +567,8 @@ analysis_mode = st.sidebar.radio(
 
 show_charts = st.sidebar.multiselect(
     "Charts to show",
-    ["Productivity", "Velocity (Real vs Expected)", "Count over Time", "Mean over Time"],
-    default=["Productivity", "Velocity (Real vs Expected)"],
+    ["Productivity", "Velocity 3M", "Velocity per Month", "Count over Time", "Mean over Time"],
+    default=["Productivity", "Velocity 3M", "Velocity per Month"],
 )
 
 if not selected_values:
@@ -568,44 +580,71 @@ df_filtered = df[df[dimension].isin(selected_values)].copy()
 db_agg = aggregate_monthly(df_filtered, dimension, config["metric_col"])
 db_agg[dimension] = db_agg[dimension].astype(str)
 
-# ── Productividad ─────────────────────────────────────────────
+
+# ── Productividad (Cálculo Paralelo para 3M y 1M) ─────────────
 if "Individual" in analysis_mode:
-    prod_df = calc_individual_productivity(
-        db_agg, dimension, config["more_is_best"], selected_values
+    prod_df_3m = calc_individual_productivity(
+        db_agg, dimension, config["more_is_best"], selected_values,
+        current_size=3, gap_size=3, baseline_size=3
+    )
+    prod_df_1m = calc_individual_productivity(
+        db_agg, dimension, config["more_is_best"], selected_values,
+        current_size=1, gap_size=3, baseline_size=3
     )
 else:
-    prod_df = calc_global_productivity(
-        db_agg, dimension, config["more_is_best"], selected_values
+    prod_df_3m = calc_global_productivity(
+        db_agg, dimension, config["more_is_best"], selected_values,
+        current_size=3, gap_size=3, baseline_size=3
+    )
+    prod_df_1m = calc_global_productivity(
+        db_agg, dimension, config["more_is_best"], selected_values,
+        current_size=1, gap_size=3, baseline_size=3
     )
 
 # ── Gráficas ──────────────────────────────────────────────────
-if prod_df.empty:
+if prod_df_3m.empty and prod_df_1m.empty:
     st.warning(
-        f"⚠️ Not enough historical data to calculate productivity. "
-        f"Each value needs at least {CURRENT_SIZE} periods."
+        f"⚠️ Not enough historical data to calculate productivity or velocity. "
+        f"Each value needs at least 1 period for Monthly and 3 periods for 3M."
     )
 else:
-    if "Productivity" in show_charts:
-        st.subheader("📈 Productivity Over Time")
+    if "Productivity" in show_charts and not prod_df_3m.empty:
+        st.subheader("📈 Productivity Over Time (3M Base)")
         st.caption(
             "Positive = better than baseline  |  Negative = worse than baseline  |  "
             "Zero line = baseline level"
         )
         st.plotly_chart(
-            make_productivity_chart(prod_df, dimension, config["label_real"], config["label_exp"]),
+            make_productivity_chart(prod_df_3m, dimension, config["label_real"], config["label_exp"]),
             use_container_width=True,
         )
 
-    if "Velocity (Real vs Expected)" in show_charts:
-        st.subheader("⚡ Velocity: Real vs Expected")
+    if "Velocity 3M" in show_charts and not prod_df_3m.empty:
+        st.subheader("⚡ Velocity 3M: Real vs Expected")
         st.caption(
-            f"{config['label_real']} = sum of {config['metric_col']} in current window  |  "
-            f"{config['label_exp']} = what baseline EpU predicts for current volume"
+            f"{config['label_real']} = sum of {config['metric_col']} in current 3-month window  |  "
+            f"{config['label_exp']} = what baseline EpU predicts for current 3-month volume"
         )
         st.plotly_chart(
             make_velocity_chart(
-                prod_df, dimension, config["metric_col"],
-                config["label_real"], config["label_exp"]
+                prod_df_3m, dimension, config["metric_col"],
+                config["label_real"], config["label_exp"],
+                chart_title=f"Velocity 3M: {config['label_real']} vs {config['label_exp']}"
+            ),
+            use_container_width=True,
+        )
+        
+    if "Velocity per Month" in show_charts and not prod_df_1m.empty:
+        st.subheader("⚡ Velocity per Month: Real vs Expected")
+        st.caption(
+            f"{config['label_real']} = sum of {config['metric_col']} in current 1-month window  |  "
+            f"{config['label_exp']} = what baseline EpU predicts for current 1-month volume"
+        )
+        st.plotly_chart(
+            make_velocity_chart(
+                prod_df_1m, dimension, config["metric_col"],
+                config["label_real"], config["label_exp"],
+                chart_title=f"Velocity per Month: {config['label_real']} vs {config['label_exp']}"
             ),
             use_container_width=True,
         )
@@ -628,13 +667,28 @@ if "Mean over Time" in show_charts:
 with st.expander("📋 Aggregated Monthly Data (db_agg)", expanded=False):
     st.dataframe(db_agg.sort_values(["Period", dimension]), use_container_width=True)
 
-if not prod_df.empty:
+if not prod_df_3m.empty or not prod_df_1m.empty:
     with st.expander("📋 Productivity Results", expanded=False):
-        display = prod_df.copy()
-        display["Productivity %"] = (display["Value"] * 100).map(
-            lambda x: f"{x:.4f}%" if pd.notna(x) else ""
-        )
-        st.dataframe(display.sort_values("ActualPeriod"), use_container_width=True)
+        tab1, tab2 = st.tabs(["3-Month Window", "1-Month Window"])
+        with tab1:
+            if not prod_df_3m.empty:
+                display_3m = prod_df_3m.copy()
+                display_3m["Productivity %"] = (display_3m["Value"] * 100).map(
+                    lambda x: f"{x:.4f}%" if pd.notna(x) else ""
+                )
+                st.dataframe(display_3m.sort_values("ActualPeriod"), use_container_width=True)
+            else:
+                st.info("No hay datos suficientes para la ventana de 3 meses.")
+                
+        with tab2:
+            if not prod_df_1m.empty:
+                display_1m = prod_df_1m.copy()
+                display_1m["Productivity %"] = (display_1m["Value"] * 100).map(
+                    lambda x: f"{x:.4f}%" if pd.notna(x) else ""
+                )
+                st.dataframe(display_1m.sort_values("ActualPeriod"), use_container_width=True)
+            else:
+                st.info("No hay datos suficientes para la ventana de 1 mes.")
 
 # ── Footer ─────────────────────────────────────────────────
 st.sidebar.markdown("---")
