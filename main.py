@@ -58,7 +58,6 @@ def load_galderma(uploaded_file):
     df = df[df["Status"].isin(["Ready to Deploy", "Closed"])].copy()
     df["Grupo"] = "Grupo"
 
-    # Lógica actualizada: Condición de retención por Developer o QA (Issue 3)
     has_dev = None
     if "Developer" in df.columns:
         has_dev = df["Developer"].notna() & (df["Developer"].astype(str).str.strip() != "") & (df["Developer"].astype(str).str.lower() != "nan")
@@ -74,35 +73,24 @@ def load_galderma(uploaded_file):
     elif has_qa is not None:
         df = df[has_qa].copy()
 
-    # Lógica actualizada: Dividir puntos por cantidad de Developers (Issue 1)
     if "Developer" in df.columns:
-        # 1. Estandarizar separador
         df["Developer"] = df["Developer"].astype(str).str.replace("-", "/", regex=False)
         
-        # 2. Convertir a lista de forma segura (previniendo errores de 'float' y 'NaN')
         def safe_split(x):
-            val = str(x).strip() # Forzamos a texto siempre para evitar errores de atributos
+            val = str(x).strip()
             if val.lower() in ["unassigned", "nan", "none", "<na>", ""]:
                 return ["Unassigned"]
             return val.split("/")
             
         df["Developer_List"] = df["Developer"].apply(safe_split)
-        
-        # 3. Contar la cantidad de developers en la lista
         df["Dev_Count"] = df["Developer_List"].apply(len)
-        
-        # 4. Dividir puntos matemáticamente
         df["Points"] = df["Points"] / df["Dev_Count"]
         
-        # 5. Expandir los registros hacia nuevas filas
         df["Developer"] = df["Developer_List"]
         df = df.explode("Developer")
-        
-        # 6. Limpieza
         df["Developer"] = df["Developer"].astype(str).str.strip()
         df = df.drop(columns=["Dev_Count", "Developer_List"])
 
-    # ════════════════════════════════════════════════════════════
     config = {
         "metric_col":   "Points",
         "more_is_best": True,
@@ -165,7 +153,6 @@ def load_ams(uploaded_file):
     df["Period"]  = df["EndDate"].dt.to_period("M").dt.to_timestamp()
     df["Effort"]  = pd.to_numeric(df["Effort"], errors="coerce")
 
-    # ════════════════════════════════════════════════════════════
     config = {
         "metric_col":   "Effort",
         "more_is_best": False,
@@ -202,7 +189,6 @@ def load_itis(uploaded_file):
     df["Grupo"] = "Grupo"
     df = df[df["Period"].notna() & df["Effort"].notna()].copy()
 
-    # ════════════════════════════════════════════════════════════
     config = {
         "metric_col":   "Effort",
         "more_is_best": False, 
@@ -217,7 +203,6 @@ def load_itis(uploaded_file):
 #  MONTHLY AGGREGATION
 # ════════════════════════════════════════════════════════════
 def aggregate_monthly(df: pd.DataFrame, dimension: str, metric_col: str) -> pd.DataFrame:
-
     agg = (
         df.groupby(["Period", dimension], dropna=False)
         .agg(n=(metric_col, "size"),
@@ -548,14 +533,11 @@ else:
 # ── Controls  ────────────────────────────────────────
 st.sidebar.header("Controls")
 
-# 1. Definimos la dimensión antes de procesarla en el DataFrame
 dimension = st.sidebar.selectbox("Analyze by", config["dimensions"])
 
-# 2. Ahora sí modificamos el DataFrame usando la dimensión seleccionada
 df[dimension] = df[dimension].astype(str)
 values = sorted(df[dimension].dropna().unique().tolist())
 
-# Remover "Unassigned" de la selección predeterminada si existe
 default_sel = [v for v in values if v != "Unassigned"][:3] if len(values) >= 3 else values
 selected_values = st.sidebar.multiselect("Select values", values, default=default_sel)
 
@@ -571,6 +553,30 @@ show_charts = st.sidebar.multiselect(
     default=["Productivity", "Velocity 3M", "Velocity per Month"],
 )
 
+# ── RANGO DE FECHAS (UI) ──────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.header("📅 Rango de Fechas")
+
+# Obtener las fechas mínima y máxima disponibles en los datos
+min_date = df["Period"].min().to_pydatetime().date()
+max_date = df["Period"].max().to_pydatetime().date()
+
+# Slider para que el usuario seleccione el rango a visualizar
+date_range = st.sidebar.slider(
+    "Selecciona el rango a visualizar",
+    min_value=min_date,
+    max_value=max_date,
+    value=(min_date, max_date),
+    format="MMM YYYY"
+)
+
+# Extraer el inicio y fin del rango seleccionado
+if len(date_range) == 2:
+    start_date, end_date = date_range
+else:
+    start_date, end_date = min_date, max_date
+
+
 if not selected_values:
     st.warning("Select at least one value.")
     st.stop()
@@ -579,7 +585,6 @@ if not selected_values:
 df_filtered = df[df[dimension].isin(selected_values)].copy()
 db_agg = aggregate_monthly(df_filtered, dimension, config["metric_col"])
 db_agg[dimension] = db_agg[dimension].astype(str)
-
 
 # ── Productividad (Cálculo Paralelo para 3M y 1M) ─────────────
 if "Individual" in analysis_mode:
@@ -601,11 +606,21 @@ else:
         current_size=1, gap_size=3, baseline_size=3
     )
 
+# ── APLICAR FILTRO DE FECHAS PARA VISUALIZACIÓN ───────────────
+# Es clave hacerlo aquí (DESPUÉS del cálculo) para mantener los históricos matemáticos
+db_agg = db_agg[(db_agg["Period"].dt.date >= start_date) & (db_agg["Period"].dt.date <= end_date)]
+
+if not prod_df_3m.empty:
+    prod_df_3m = prod_df_3m[(prod_df_3m["ActualPeriod"].dt.date >= start_date) & (prod_df_3m["ActualPeriod"].dt.date <= end_date)]
+    
+if not prod_df_1m.empty:
+    prod_df_1m = prod_df_1m[(prod_df_1m["ActualPeriod"].dt.date >= start_date) & (prod_df_1m["ActualPeriod"].dt.date <= end_date)]
+
+
 # ── Gráficas ──────────────────────────────────────────────────
 if prod_df_3m.empty and prod_df_1m.empty:
     st.warning(
-        f"⚠️ Not enough historical data to calculate productivity or velocity. "
-        f"Each value needs at least 1 period for Monthly and 3 periods for 3M."
+        f"⚠️ No hay datos suficientes o el rango de fecha seleccionado no contiene métricas calculables. "
     )
 else:
     if "Productivity" in show_charts and not prod_df_3m.empty:
@@ -678,7 +693,7 @@ if not prod_df_3m.empty or not prod_df_1m.empty:
                 )
                 st.dataframe(display_3m.sort_values("ActualPeriod"), use_container_width=True)
             else:
-                st.info("No hay datos suficientes para la ventana de 3 meses.")
+                st.info("No hay datos calculados para mostrar en este rango.")
                 
         with tab2:
             if not prod_df_1m.empty:
@@ -688,7 +703,7 @@ if not prod_df_3m.empty or not prod_df_1m.empty:
                 )
                 st.dataframe(display_1m.sort_values("ActualPeriod"), use_container_width=True)
             else:
-                st.info("No hay datos suficientes para la ventana de 1 mes.")
+                st.info("No hay datos calculados para mostrar en este rango.")
 
 # ── Footer ─────────────────────────────────────────────────
 st.sidebar.markdown("---")
