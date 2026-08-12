@@ -1,11 +1,12 @@
 # 📊 Productivity Analysis Dashboard
 
-Aplicación interactiva construida con **Streamlit** para analizar la productividad de equipos a través de dos modelos distintos según el cliente:
+Aplicación interactiva construida con **Streamlit** para analizar la productividad de equipos a través de distintos modelos según el cliente o tipo de servicio:
 
 | Modelo | Cliente | Métrica | Lógica |
 |---|---|---|---|
 | 🟢 **Galderma** | Galderma | Story Points | More is Best |
 | 🔵 **AMS** | AMS / Softtek | Horas de Esfuerzo | Less is Best |
+| 🟠 **ITIS** | ITIS | Duración del Ticket (Horas) | Less is Best |
 
 ---
 
@@ -38,10 +39,9 @@ https://appcopygit-wvg8kuvbnjb2spu2pco42l.streamlit.app/
 
 ## 📂 Formato del archivo Excel
 
-La app detecta automáticamente las columnas del Excel. La hoja debe llamarse **`RawData`** (o ser la primera hoja del archivo).
+La app detecta automáticamente el modelo seleccionado y busca columnas clave. La hoja de datos debe llamarse **`RawData`** o **`Data Template`** (o ser la primera hoja del archivo).
 
 ### Modelo AMS — Columnas requeridas
-
 | Columna | Descripción | Requerida |
 |---|---|---|
 | `Assigned To` | Nombre completo del recurso | ✅ Sí |
@@ -56,14 +56,32 @@ La app detecta automáticamente las columnas del Excel. La hoja debe llamarse **
 > El sistema también acepta variantes: `Assignee`, `Resource` en lugar de `Assigned To`; `End Date` en lugar de `EndDate`.
 
 ### Modelo Galderma — Columnas requeridas
+| Columna | Descripción | Requerida |
+|---|---|---|
+| `Developer` | Nombre del desarrollador (acepta múltiples con `/`) | ✅ Sí (o QA Tester) |
+| `QA Tester` | Tester asignado | No |
+| `Points` | Story points entregados (se dividen entre Devs) | ✅ Sí |
+| `Period` | Período del mes (fecha) | ✅ Sí |
+| `Status` | Estado del ticket (ej: `Closed`, `Ready to Deploy`) | ✅ Sí |
 
-| Columna | Descripción |
+### Modelo ITIS — Columnas requeridas
+| Columna | Descripción | Requerida |
+|---|---|---|
+| `Assignee` | Nombre del recurso asignado | ✅ Sí |
+| `Ticket Type` | Tipo de ticket | ✅ Sí |
+| `Ticket Closed/Resolved Date` | Fecha de cierre del ticket | ✅ Sí |
+| `Ticket Duration` | Tiempo invertido en minutos | ✅ Sí |
+
+### Controles del panel lateral
+| Control | Descripción |
 |---|---|
-| `Developer` | Nombre del desarrollador (acepta múltiples separados por `/`) |
-| `Points` | Story points entregados |
-| `Period` | Período del mes (fecha) |
-| `Status` | Estado del ticket — solo se procesan `Ready to Deploy` y `Closed` |
-| `QA Tester` | Tester asignado (opcional) |
+| **Select productivity model** | Alterna entre Galderma (Points), AMS (Effort) e ITIS (Duration) |
+| **Upload Excel file** | Carga el archivo `.xlsx` con los datos |
+| **Analyze by** | Dimensión de análisis (ej: `Assigned To`, `Ticket Type`, `Developer`, etc.) |
+| **Select values** | Filtra qué recursos o categorías incluir en el análisis |
+| **Analysis mode** | `Individual`: una línea por valor. `Global`: todos combinados en una sola serie de equipo |
+| **Charts to show** | Selecciona cuáles gráficas renderizar en pantalla |
+| **Rango de Fechas** | Slider interactivo para filtrar el período visualizado. *(El filtro se aplica al final del proceso para no afectar el historial matemático del baseline)*. |
 
 ---
 
@@ -82,7 +100,7 @@ La app detecta automáticamente las columnas del Excel. La hoja debe llamarse **
 
 ## 📐 Lógica de cálculo
 
-El motor de productividad compara el desempeño actual contra una **línea base histórica** mediante ventanas deslizantes de períodos mensuales.
+El motor de productividad compara el desempeño actual contra una línea base histórica mediante ventanas deslizantes. El sistema ahora permite calcular métricas en paralelo con ventanas de 3 Meses y 1 Mes.
 
 ### Parámetros de ventana
 
@@ -110,8 +128,8 @@ Para cada combinación de `(Período, Dimensión)` se calculan tres valores:
 | Campo | Descripción |
 |---|---|
 | `n` | Cantidad de tickets en ese mes |
-| `Sum` | Suma total de la métrica (Effort o Points) |
-| `Mean` | Promedio de la métrica por ticket |
+| `Sum` | Suma total de la métrica (Effort, Duration/Hrs o Points) |
+| `Mean` | Promedio matemático de la métrica por ticket |
 
 **Ejemplo AMS:**
 
@@ -165,8 +183,9 @@ Donde **σ** depende del modelo:
 
 | Modelo | σ | Razón |
 |---|---|---|
-| AMS — Less is Best | **-1** | Esfuerzo bajo = bueno → el resultado se invierte para que positivo = mejora |
-| Galderma — More is Best | **+1** | Puntos altos = bueno → sin inversión |
+| AMS / ITIS — Less is Best | **-1** | Menos horas = bueno → el resultado se invierte para que positivo = mejora |
+| Galderma — More is Best | **+1** | Más puntos = bueno → sin inversión |
+
 
 **Ejemplo AMS (Less is Best):**
 ```
@@ -211,12 +230,12 @@ La **línea punteada negra** en los gráficos marca el 0% (nivel de baseline).
 
 ---
 
-## 📊 Gráficos disponibles
-
+### Gráficos disponibles
 | Gráfico | Descripción |
 |---|---|
-| **Productivity Over Time** | Índice de productividad en % vs el baseline. Línea cero = referencia |
-| **Velocity: Real vs Expected** | Compara el esfuerzo/puntos real contra lo que predice el baseline |
-| **Count Over Time** | Cantidad de tickets procesados por período |
-| **Mean Over Time** | Promedio de esfuerzo/puntos por ticket por período |
+| **Productivity Over Time** | Índice de productividad en % vs el baseline (Ventana de 3 Meses). |
+| **Velocity 3M** | Compara la métrica Real vs Esperada evaluada en bloques móviles de 3 meses. |
+| **Velocity per Month** | Compara la métrica Real vs Esperada evaluada mes a mes (Ventana de 1 Mes). |
+| **Count Over Time** | Cantidad de tickets procesados en el período. |
+| **Mean Over Time** | Promedio (`Mean`) de la métrica calculada por ticket en el mes. |
 
