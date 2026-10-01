@@ -73,23 +73,39 @@ def load_galderma(uploaded_file):
     elif has_qa is not None:
         df = df[has_qa].copy()
 
-    if "Developer" in df.columns:
+#########################
+if "Developer" in df.columns:
         df["Developer"] = df["Developer"].astype(str).str.replace("-", "/", regex=False)
         
         def safe_split(x):
             val = str(x).strip()
             if val.lower() in ["unassigned", "nan", "none", "<na>", ""]:
                 return ["Unassigned"]
-            return val.split("/")
+            return [d.strip() for d in val.split("/") if d.strip()]
             
         df["Developer_List"] = df["Developer"].apply(safe_split)
-        df["Dev_Count"] = df["Developer_List"].apply(len)
-        df["Points"] = df["Points"] / df["Dev_Count"]
-        
-        df["Developer"] = df["Developer_List"]
-        df = df.explode("Developer")
-        df["Developer"] = df["Developer"].astype(str).str.strip()
-        df = df.drop(columns=["Dev_Count", "Developer_List"])
+
+        def distribute_integer_points(row):
+            pts = row["Points"]
+            devs = row["Developer_List"]
+            n = len(devs)
+            if pd.isna(pts) or n == 0:
+                return [0] * max(1, n)
+            pts = int(round(pts))
+            base = pts // n
+            remainder = pts % n
+            return [base + 1 if i < remainder else base for i in range(n)]
+
+        df["Points_List"] = df.apply(distribute_integer_points, axis=1)
+        df["Dev_Points_Pairs"] = df.apply(
+            lambda r: list(zip(r["Developer_List"], r["Points_List"])), axis=1
+        )
+        df = df.explode("Dev_Points_Pairs")
+        df["Developer"] = df["Dev_Points_Pairs"].apply(lambda x: x[0] if isinstance(x, tuple) else "Unassigned")
+        df["Points"] = df["Dev_Points_Pairs"].apply(lambda x: x[1] if isinstance(x, tuple) else 0)
+        df = df.drop(columns=["Developer_List", "Points_List", "Dev_Points_Pairs"])
+
+############################
 
     config = {
         "metric_col":   "Points",
