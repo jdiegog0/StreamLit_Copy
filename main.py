@@ -73,8 +73,7 @@ def load_galderma(uploaded_file):
     elif has_qa is not None:
         df = df[has_qa].copy()
 
-#########################
-if "Developer" in df.columns:
+    if "Developer" in df.columns:
         df["Developer"] = df["Developer"].astype(str).str.replace("-", "/", regex=False)
         
         def safe_split(x):
@@ -104,8 +103,6 @@ if "Developer" in df.columns:
         df["Developer"] = df["Dev_Points_Pairs"].apply(lambda x: x[0] if isinstance(x, tuple) else "Unassigned")
         df["Points"] = df["Dev_Points_Pairs"].apply(lambda x: x[1] if isinstance(x, tuple) else 0)
         df = df.drop(columns=["Developer_List", "Points_List", "Dev_Points_Pairs"])
-
-############################
 
     config = {
         "metric_col":   "Points",
